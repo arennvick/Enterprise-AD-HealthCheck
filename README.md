@@ -5,10 +5,11 @@ This workspace contains a complete PowerShell AD health check script:
 - `Invoke-ADHealthCheck.ps1`
 - `Invoke-ADHealthCheck-v2.ps1`
 - `Invoke-ADHealthCheck-v2.1.ps1`
+- `Invoke-ADHealthCheck-v2.3.ps1`
 
 It discovers every domain controller in the current forest and writes a single self-contained HTML dashboard that can be opened from a network share by any browser.
 
-Use `Invoke-ADHealthCheck-v2.1.ps1` for the newest dashboard, charting, footer, and GPO backup comparison features.
+Use `Invoke-ADHealthCheck-v2.3.ps1` for the newest modern dashboard, theme selector, GitHub update notification, charting, footer, and GPO backup comparison features. Current embedded script version: `2.3.5`.
 
 ## What It Checks
 
@@ -30,7 +31,10 @@ Use `Invoke-ADHealthCheck-v2.1.ps1` for the newest dashboard, charting, footer, 
 - AD sites, site links, subnets, and DC counts per site
 - GPO AD/SYSVOL version health and unlinked GPO visibility
 - GPO backup on every run and comparison with the previous run for added, removed, or changed GPOs
+- GPO inventory JSON creation for each run, with ID normalization, field-alias support, name fallback matching, and zero-overlap protection so existing GPOs are not marked as newly added when an older inventory used a different format
 - Grouped summary sections and dashboard footer with script version, runtime, credits, and disclaimer
+- GitHub release update check with dashboard notification and download button
+- Theme selector at the top of the dashboard for Classic or Dark mode
 - Optional recent event log errors from Directory Service, DNS Server, DFS Replication, and System logs
 
 ## Requirements
@@ -53,7 +57,7 @@ Open an elevated PowerShell session on an AD server or management server:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\Invoke-ADHealthCheck-v2.1.ps1
+.\Invoke-ADHealthCheck-v2.3.ps1
 ```
 
 The script saves an HTML file in the current folder using a name like:
@@ -65,7 +69,7 @@ ADHealthDashboard_contoso.com_20260505_210000.html
 ## Save to a Network Share
 
 ```powershell
-.\Invoke-ADHealthCheck-v2.1.ps1 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+.\Invoke-ADHealthCheck-v2.3.ps1 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
 ```
 
 Any computer with access to that share can open the HTML file in a browser.
@@ -73,7 +77,7 @@ Any computer with access to that share can open the HTML file in a browser.
 ## Full Run With Event Logs
 
 ```powershell
-.\Invoke-ADHealthCheck-v2.1.ps1 -IncludeEventLogs -EventLogHours 24 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+.\Invoke-ADHealthCheck-v2.3.ps1 -IncludeEventLogs -EventLogHours 24 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
 ```
 
 Event log collection can be slower and may require firewall/RPC permissions.
@@ -83,7 +87,35 @@ Event log collection can be slower and may require firewall/RPC permissions.
 By default, the dashboard warns when the latest installed hotfix on a DC is older than 45 days, or when patch data cannot be queried.
 
 ```powershell
-.\Invoke-ADHealthCheck-v2.1.ps1 -PatchWarningDays 60 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+.\Invoke-ADHealthCheck-v2.3.ps1 -PatchWarningDays 60 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+
+## GitHub Update Notification
+
+Version 2.1 and newer can check the latest GitHub release or tag when the script runs. If a newer version is found, the generated dashboard shows a notification banner with a download button.
+
+The default repository is:
+
+```text
+https://github.com/arennvick/Enterprise-AD-HealthCheck
+```
+
+So you can run normally without passing a GitHub parameter:
+
+```powershell
+.\Invoke-ADHealthCheck-v2.3.ps1 -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+```
+
+If the running script is `v2.1.0` and the latest GitHub release or tag is `v2.2.0`, the generated dashboard will show an update available banner.
+
+```powershell
+.\Invoke-ADHealthCheck-v2.3.ps1 -GitHubRepositoryUrl "https://github.com/your-org/your-repo" -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+```
+
+Disable the check when the script server has no internet access:
+
+```powershell
+.\Invoke-ADHealthCheck-v2.3.ps1 -SkipUpdateCheck -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+```
 ```
 
 ## GPO Backups and Change Comparison
@@ -99,13 +131,13 @@ Default backup folder:
 Custom backup folder:
 
 ```powershell
-.\Invoke-ADHealthCheck-v2.1.ps1 -GpoBackupRoot "\\fileserver\share\ADHealth_GPOBackups" -OutputPath "\\fileserver\share\ADHealthDashboard.html"
+.\Invoke-ADHealthCheck-v2.3.ps1 -GpoBackupRoot "\\fileserver\share\ADHealth_GPOBackups" -OutputPath "\\fileserver\share\ADHealthDashboard.html"
 ```
 
 ## Faster Run
 
 ```powershell
-.\Invoke-ADHealthCheck-v2.1.ps1 -SkipDcDiag -SkipDnsTests -SkipGpoTests
+.\Invoke-ADHealthCheck-v2.3.ps1 -SkipDcDiag -SkipDnsTests -SkipGpoTests
 ```
 
 ## Connectivity Notes
