@@ -46,11 +46,16 @@ param(
 
     [string]$GpoBackupRoot,
 
+    [string]$GitHubRepositoryUrl = 'https://github.com/arennvick/Enterprise-AD-HealthCheck',
+
+    [switch]$SkipUpdateCheck,
+
     [switch]$OpenReport
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Continue'
+$scriptVersion = '2.3.2'
 
 function New-Result {
     param(
@@ -320,6 +325,176 @@ function Get-NumericSum {
         }
     }
     return $total
+}
+
+function Convert-GitHubRepoToApiUrl {
+    param([string]$RepositoryUrl)
+
+    if ([string]::IsNullOrWhiteSpace($RepositoryUrl)) {
+        return ''
+    }
+
+    $trimmed = $RepositoryUrl.Trim().TrimEnd('/')
+    if ($trimmed -match '^https://api\.github\.com/repos/[^/]+/[^/]+') {
+        return "$trimmed/releases/latest"
+    }
+    if ($trimmed -match '^https://github\.com/([^/]+)/([^/]+)') {
+        return "https://api.github.com/repos/$($Matches[1])/$($Matches[2])/releases/latest"
+    }
+    if ($trimmed -match '^([^/]+)/([^/]+)$') {
+        return "https://api.github.com/repos/$($Matches[1])/$($Matches[2])/releases/latest"
+    }
+
+    return ''
+}
+
+function Convert-GitHubRepoToReleaseUrl {
+    param([string]$RepositoryUrl)
+
+    if ([string]::IsNullOrWhiteSpace($RepositoryUrl)) {
+        return ''
+    }
+
+    $trimmed = $RepositoryUrl.Trim().TrimEnd('/')
+    if ($trimmed -match '^https://github\.com/[^/]+/[^/]+') {
+        return "$trimmed/releases/latest"
+    }
+    if ($trimmed -match '^https://api\.github\.com/repos/([^/]+)/([^/]+)') {
+        return "https://github.com/$($Matches[1])/$($Matches[2])/releases/latest"
+    }
+    if ($trimmed -match '^([^/]+)/([^/]+)$') {
+        return "https://github.com/$($Matches[1])/$($Matches[2])/releases/latest"
+    }
+
+    return $trimmed
+}
+
+function Convert-ToComparableVersion {
+    param([string]$VersionText)
+
+    if ([string]::IsNullOrWhiteSpace($VersionText)) {
+        return [version]'0.0.0'
+    }
+
+    $clean = ($VersionText -replace '^[vV]', '') -replace '[^0-9.]', ''
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return [version]'0.0.0'
+    }
+
+    $parts = @($clean.Split('.') | Where-Object { $_ -ne '' })
+    while ($parts.Count -lt 3) {
+        $parts += '0'
+    }
+
+    try {
+        return [version]($parts[0..2] -join '.')
+    }
+    catch {
+        return [version]'0.0.0'
+    }
+}
+
+function Test-NewerVersion {
+    param(
+        [string]$CurrentVersion,
+        [string]$LatestVersion
+    )
+
+    $current = Convert-ToComparableVersion -VersionText $CurrentVersion
+    $latest = Convert-ToComparableVersion -VersionText $LatestVersion
+    return ($latest -gt $current)
+}
+
+function Get-GpoIdentifierFromXml {
+    param([object]$GpoXmlNode)
+
+    $identifier = ''
+
+    try {
+        if ($GpoXmlNode.Identifier -and $GpoXmlNode.Identifier.Identifier) {
+            $identifier = [string]$GpoXmlNode.Identifier.Identifier.'#text'
+        }
+    }
+    catch {}
+
+    if ([string]::IsNullOrWhiteSpace($identifier)) {
+        try {
+            $innerText = [string]$GpoXmlNode.Identifier.InnerText
+            if ($innerText -match '\{[0-9A-Fa-f-]{36}\}') {
+                $identifier = $Matches[0]
+            }
+        }
+        catch {}
+    }
+
+    if ([string]::IsNullOrWhiteSpace($identifier)) {
+        try {
+            $outerXml = [string]$GpoXmlNode.OuterXml
+            if ($outerXml -match '\{[0-9A-Fa-f-]{36}\}') {
+                $identifier = $Matches[0]
+            }
+        }
+        catch {}
+    }
+
+    return $identifier
+}
+
+function ConvertTo-GpoIdKey {
+    param([object]$Id)
+
+    if ($null -eq $Id -or [string]::IsNullOrWhiteSpace([string]$Id)) {
+        return ''
+    }
+
+    if ($Id -is [guid]) {
+        return $Id.ToString('D').ToLowerInvariant()
+    }
+
+    if (-not ($Id -is [string]) -and -not ($Id.GetType().IsPrimitive)) {
+        foreach ($propertyName in @('Id', 'Guid', 'GpoId', 'GPOId', 'Identifier', 'Value')) {
+            $property = $Id.PSObject.Properties[$propertyName]
+            if ($property -and $null -ne $property.Value) {
+                $candidate = ConvertTo-GpoIdKey -Id $property.Value
+                if ($candidate) {
+                    return $candidate
+                }
+            }
+        }
+    }
+
+    $idText = ([string]$Id).Trim()
+    if ($idText -match '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}') {
+        return $Matches[0].ToLowerInvariant()
+    }
+
+    $clean = $idText.Trim('{', '}')
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return ''
+    }
+
+    return $clean.ToLowerInvariant()
+}
+
+function ConvertTo-GpoNameKey {
+    param([object]$Name)
+
+    if ($null -eq $Name -or [string]::IsNullOrWhiteSpace([string]$Name)) {
+        return ''
+    }
+
+    return (([string]$Name).Trim() -replace '\s+', ' ').ToLowerInvariant()
+}
+
+function ConvertTo-GpoDisplayId {
+    param([object]$Id)
+
+    $key = ConvertTo-GpoIdKey -Id $Id
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        return ''
+    }
+
+    return "{$key}"
 }
 
 Write-Host "Starting AD health check..." -ForegroundColor Cyan
@@ -1114,10 +1289,12 @@ if (-not $SkipGpoTests -and $gpoModuleResult.Status -eq 'Pass' -and $domains.Cou
                     'GPO AD/SYSVOL versions match.'
                 }
 
+                $gpoId = Get-GpoIdentifierFromXml -GpoXmlNode $gpo
+
                 $gpoHealth += [pscustomobject]@{
                     Domain                 = $domainName
                     Name                   = $gpo.Name
-                    Id                     = $gpo.Identifier.Identifier.'#text'
+                    Id                     = $gpoId
                     Status                 = $status
                     GpoStatus              = $gpo.GPOStatus
                     Created                = $gpo.CreatedTime
@@ -1196,16 +1373,60 @@ if (-not $SkipGpoTests -and $gpoModuleResult.Status -eq 'Pass' -and $domains.Cou
         $domainBackupPath = Join-Path -Path $backupRunPath -ChildPath $safeDomain
         $currentInventoryPath = Join-Path -Path $domainBackupPath -ChildPath 'gpo-inventory.json'
         $previousInventoryPath = if ($previousRunPath) { Join-Path -Path (Join-Path -Path $previousRunPath -ChildPath $safeDomain) -ChildPath 'gpo-inventory.json' } else { $null }
-        $domainGpos = @($gpoHealth | Where-Object { $_.Domain -eq $domainName -and $_.Id })
+        $domainGpos = @($gpoHealth | Where-Object { $_.Domain -eq $domainName })
 
         try {
             New-Item -Path $domainBackupPath -ItemType Directory -Force | Out-Null
             $backupResult = @(Backup-GPO -All -Domain $domainName -Path $domainBackupPath -ErrorAction Stop)
 
-            $domainGpos |
-                Select-Object Domain, Name, Id, GpoStatus, Created, Modified, ComputerVersionAD, ComputerVersionSYSVOL, UserVersionAD, UserVersionSYSVOL, LinkCount |
-                ConvertTo-Json -Depth 8 |
-                Set-Content -Path $currentInventoryPath -Encoding UTF8
+            $healthById = @{}
+            $healthByName = @{}
+            foreach ($healthGpo in $domainGpos) {
+                $idKey = ConvertTo-GpoIdKey -Id $healthGpo.Id
+                if ($idKey) {
+                    $healthById[$idKey] = $healthGpo
+                }
+                if ($healthGpo.Name) {
+                    $healthByName[[string]$healthGpo.Name] = $healthGpo
+                }
+            }
+
+            $gpoObjects = @(Get-GPO -All -Domain $domainName -ErrorAction Stop)
+            $inventory = @(
+                foreach ($gpoObject in $gpoObjects) {
+                    $displayName = [string]$gpoObject.DisplayName
+                    $idKey = ConvertTo-GpoIdKey -Id $gpoObject.Id
+                    $health = if ($idKey -and $healthById.ContainsKey($idKey)) {
+                        $healthById[$idKey]
+                    }
+                    elseif ($displayName -and $healthByName.ContainsKey($displayName)) {
+                        $healthByName[$displayName]
+                    }
+                    else {
+                        $null
+                    }
+
+                    [pscustomobject]@{
+                        Domain                = $domainName
+                        Name                  = $displayName
+                        Id                    = ConvertTo-GpoDisplayId -Id $gpoObject.Id
+                        GpoStatus             = [string]$gpoObject.GpoStatus
+                        Created               = $gpoObject.CreationTime
+                        Modified              = $gpoObject.ModificationTime
+                        ComputerVersionAD     = if ($health) { $health.ComputerVersionAD } else { $null }
+                        ComputerVersionSYSVOL = if ($health) { $health.ComputerVersionSYSVOL } else { $null }
+                        UserVersionAD         = if ($health) { $health.UserVersionAD } else { $null }
+                        UserVersionSYSVOL     = if ($health) { $health.UserVersionSYSVOL } else { $null }
+                        LinkCount             = if ($health) { $health.LinkCount } else { $null }
+                    }
+                }
+            )
+            $inventoryJson = if ($inventory.Count -gt 0) { $inventory | ConvertTo-Json -Depth 8 } else { '[]' }
+            Set-Content -Path $currentInventoryPath -Value $inventoryJson -Encoding UTF8
+
+            if (-not (Test-Path -Path $currentInventoryPath)) {
+                throw "GPO inventory file was not created at $currentInventoryPath"
+            }
 
             $gpoBackupInfo += [pscustomobject]@{
                 Status          = 'Pass'
@@ -1213,43 +1434,76 @@ if (-not $SkipGpoTests -and $gpoModuleResult.Status -eq 'Pass' -and $domains.Cou
                 BackupPath      = $domainBackupPath
                 PreviousRunPath = if ($previousRunPath) { $previousRunPath } else { '' }
                 BackupCount     = $backupResult.Count
-                Message         = "Created $($backupResult.Count) GPO backup item(s)."
+                Message         = "Created $($backupResult.Count) GPO backup item(s). Inventory: $currentInventoryPath"
             }
 
             if ($previousInventoryPath -and (Test-Path -Path $previousInventoryPath)) {
+                $changeCountBeforeDomain = @($gpoChangeHealth).Count
                 $previousGpos = @(Get-Content -Path $previousInventoryPath -Raw | ConvertFrom-Json)
                 $previousById = @{}
                 $currentById = @{}
+                $previousByName = @{}
+                $currentByName = @{}
+                $matchedPreviousIds = @{}
+                $matchedPreviousNames = @{}
 
-                foreach ($gpo in $previousGpos) {
-                    if ($gpo.Id) { $previousById[[string]$gpo.Id] = $gpo }
+                foreach ($gpo in @($previousGpos | Where-Object { $_.Name -or $_.Id })) {
+                    $idKey = ConvertTo-GpoIdKey -Id $gpo.Id
+                    $nameKey = ConvertTo-GpoNameKey -Name $gpo.Name
+                    if ($idKey -and -not $previousById.ContainsKey($idKey)) { $previousById[$idKey] = $gpo }
+                    if ($nameKey -and -not $previousByName.ContainsKey($nameKey)) { $previousByName[$nameKey] = $gpo }
                 }
-                foreach ($gpo in $domainGpos) {
-                    if ($gpo.Id) { $currentById[[string]$gpo.Id] = $gpo }
+                foreach ($gpo in @($inventory | Where-Object { $_.Name -or $_.Id })) {
+                    $idKey = ConvertTo-GpoIdKey -Id $gpo.Id
+                    $nameKey = ConvertTo-GpoNameKey -Name $gpo.Name
+                    if ($idKey -and -not $currentById.ContainsKey($idKey)) { $currentById[$idKey] = $gpo }
+                    if ($nameKey -and -not $currentByName.ContainsKey($nameKey)) { $currentByName[$nameKey] = $gpo }
                 }
 
-                foreach ($id in $currentById.Keys) {
-                    if (-not $previousById.ContainsKey($id)) {
+                foreach ($gpo in @($inventory | Where-Object { $_.Name -or $_.Id })) {
+                    $id = ConvertTo-GpoIdKey -Id $gpo.Id
+                    $nameKey = ConvertTo-GpoNameKey -Name $gpo.Name
+                    $old = $null
+                    $matchedBy = ''
+
+                    if ($id -and $previousById.ContainsKey($id)) {
+                        $old = $previousById[$id]
+                        $matchedBy = 'Id'
+                    }
+                    elseif ($nameKey -and $previousByName.ContainsKey($nameKey)) {
+                        $old = $previousByName[$nameKey]
+                        $matchedBy = 'Name'
+                    }
+
+                    if ($null -eq $old) {
                         $gpoChangeHealth += [pscustomobject]@{
                             Status       = 'Info'
                             Domain       = $domainName
                             ChangeType   = 'Added'
-                            GPO          = $currentById[$id].Name
-                            Id           = $id
+                            GPO          = $gpo.Name
+                            Id           = ConvertTo-GpoDisplayId -Id $id
                             Previous     = ''
-                            Current      = "Created/first seen. Modified: $($currentById[$id].Modified)"
+                            Current      = "Created/first seen. Modified: $($gpo.Modified)"
                             Message      = 'GPO exists in current run but not in previous run.'
                         }
                     }
                     else {
-                        $old = $previousById[$id]
-                        $new = $currentById[$id]
+                        $new = $gpo
                         $changes = New-Object System.Collections.Generic.List[string]
+                        $oldId = ConvertTo-GpoIdKey -Id $old.Id
+                        $oldNameKey = ConvertTo-GpoNameKey -Name $old.Name
+
+                        if ($oldId) { $matchedPreviousIds[$oldId] = $true }
+                        if ($oldNameKey) { $matchedPreviousNames[$oldNameKey] = $true }
 
                         foreach ($property in @('Name', 'GpoStatus', 'Modified', 'ComputerVersionAD', 'ComputerVersionSYSVOL', 'UserVersionAD', 'UserVersionSYSVOL', 'LinkCount')) {
                             if ([string]$old.$property -ne [string]$new.$property) {
                                 $changes.Add("$property`: '$($old.$property)' -> '$($new.$property)'")
                             }
+                        }
+
+                        if ($matchedBy -eq 'Name' -and $oldId -and $id -and $oldId -ne $id) {
+                            $changes.Add("Inventory ID was normalized from previous '$($old.Id)' to current '$($new.Id)'")
                         }
 
                         if ($changes.Count -gt 0) {
@@ -1258,7 +1512,7 @@ if (-not $SkipGpoTests -and $gpoModuleResult.Status -eq 'Pass' -and $domains.Cou
                                 Domain       = $domainName
                                 ChangeType   = 'Changed'
                                 GPO          = $new.Name
-                                Id           = $id
+                                Id           = ConvertTo-GpoDisplayId -Id $id
                                 Previous     = $old.Name
                                 Current      = $new.Name
                                 Message      = ($changes -join '; ')
@@ -1267,18 +1521,49 @@ if (-not $SkipGpoTests -and $gpoModuleResult.Status -eq 'Pass' -and $domains.Cou
                     }
                 }
 
-                foreach ($id in $previousById.Keys) {
-                    if (-not $currentById.ContainsKey($id)) {
+                foreach ($gpo in @($previousGpos | Where-Object { $_.Name -or $_.Id })) {
+                    $id = ConvertTo-GpoIdKey -Id $gpo.Id
+                    $nameKey = ConvertTo-GpoNameKey -Name $gpo.Name
+                    $existsById = ($id -and ($currentById.ContainsKey($id) -or $matchedPreviousIds.ContainsKey($id)))
+                    $existsByName = ($nameKey -and ($currentByName.ContainsKey($nameKey) -or $matchedPreviousNames.ContainsKey($nameKey)))
+
+                    if (-not $existsById -and -not $existsByName) {
                         $gpoChangeHealth += [pscustomobject]@{
                             Status       = 'Warn'
                             Domain       = $domainName
                             ChangeType   = 'Removed'
-                            GPO          = $previousById[$id].Name
-                            Id           = $id
-                            Previous     = "Modified: $($previousById[$id].Modified)"
+                            GPO          = $gpo.Name
+                            Id           = ConvertTo-GpoDisplayId -Id $id
+                            Previous     = "Modified: $($gpo.Modified)"
                             Current      = ''
                             Message      = 'GPO existed in previous run but not in current run.'
                         }
+                    }
+                }
+
+                $changeCountAfterDomain = @($gpoChangeHealth).Count
+                if ($previousById.Count -eq 0 -and $currentById.Count -eq 0) {
+                    $gpoChangeHealth += [pscustomobject]@{
+                        Status       = 'Warn'
+                        Domain       = $domainName
+                        ChangeType   = 'Inventory issue'
+                        GPO          = 'All'
+                        Id           = ''
+                        Previous     = $previousInventoryPath
+                        Current      = $currentInventoryPath
+                        Message      = 'Previous and current inventory files do not contain comparable GPO IDs. A fresh baseline was created; run the script again to compare.'
+                    }
+                }
+                elseif ($changeCountAfterDomain -eq $changeCountBeforeDomain) {
+                    $gpoChangeHealth += [pscustomobject]@{
+                        Status       = 'Pass'
+                        Domain       = $domainName
+                        ChangeType   = 'No changes'
+                        GPO          = 'All'
+                        Id           = ''
+                        Previous     = $previousInventoryPath
+                        Current      = $currentInventoryPath
+                        Message      = 'No GPO additions, removals, or tracked property changes were detected since the previous run.'
                     }
                 }
             }
@@ -1426,6 +1711,69 @@ $summaryCards = @(
     [pscustomobject]@{ Label = 'Runtime'; Value = [math]::Round(($completedAt - $startedAt).TotalMinutes, 2); Status = 'Info'; Detail = 'Minutes used to collect this report.' }
 )
 
+$updateInfo = [ordered]@{
+    Status           = if ($SkipUpdateCheck) { 'Skipped' } else { 'Info' }
+    CurrentVersion   = $scriptVersion
+    LatestVersion    = ''
+    IsUpdateAvailable = $false
+    RepositoryUrl    = $GitHubRepositoryUrl
+    ReleaseUrl       = Convert-GitHubRepoToReleaseUrl -RepositoryUrl $GitHubRepositoryUrl
+    Message          = if ($SkipUpdateCheck) { 'Update check skipped by parameter.' } else { 'No update check has run yet.' }
+    CheckedAt        = (Get-Date).ToString('s')
+}
+
+if (-not $SkipUpdateCheck) {
+    $apiUrl = Convert-GitHubRepoToApiUrl -RepositoryUrl $GitHubRepositoryUrl
+    if ([string]::IsNullOrWhiteSpace($apiUrl)) {
+        $updateInfo.Status = 'Warn'
+        $updateInfo.Message = 'GitHub repository URL was not recognized. Use owner/repo or https://github.com/owner/repo.'
+    }
+    else {
+        try {
+            Write-Host "Checking GitHub for newer script release..." -ForegroundColor Cyan
+            $latestRelease = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -Headers @{ 'User-Agent' = 'ADHealthDashboard' } -TimeoutSec 8 -ErrorAction Stop
+            $latestVersion = if ($latestRelease.tag_name) { [string]$latestRelease.tag_name } else { [string]$latestRelease.name }
+            $releaseUrl = if ($latestRelease.html_url) { [string]$latestRelease.html_url } else { Convert-GitHubRepoToReleaseUrl -RepositoryUrl $GitHubRepositoryUrl }
+            $isNewer = Test-NewerVersion -CurrentVersion $scriptVersion -LatestVersion $latestVersion
+
+            $updateInfo.Status = if ($isNewer) { 'Warn' } else { 'Pass' }
+            $updateInfo.LatestVersion = $latestVersion
+            $updateInfo.IsUpdateAvailable = $isNewer
+            $updateInfo.ReleaseUrl = $releaseUrl
+            $updateInfo.Message = if ($isNewer) { "A newer release is available: $latestVersion." } else { "This script is current. Latest release: $latestVersion." }
+            $updateInfo.CheckedAt = (Get-Date).ToString('s')
+        }
+        catch {
+            try {
+                $tagsUrl = $apiUrl -replace '/releases/latest$', '/tags'
+                $latestTags = @(Invoke-RestMethod -Uri $tagsUrl -UseBasicParsing -Headers @{ 'User-Agent' = 'ADHealthDashboard' } -TimeoutSec 8 -ErrorAction Stop)
+                if ($latestTags.Count -gt 0 -and $latestTags[0].name) {
+                    $latestVersion = [string]$latestTags[0].name
+                    $releaseUrl = Convert-GitHubRepoToReleaseUrl -RepositoryUrl $GitHubRepositoryUrl
+                    $isNewer = Test-NewerVersion -CurrentVersion $scriptVersion -LatestVersion $latestVersion
+
+                    $updateInfo.Status = if ($isNewer) { 'Warn' } else { 'Pass' }
+                    $updateInfo.LatestVersion = $latestVersion
+                    $updateInfo.IsUpdateAvailable = $isNewer
+                    $updateInfo.ReleaseUrl = $releaseUrl
+                    $updateInfo.Message = if ($isNewer) { "A newer tag is available: $latestVersion." } else { "This script is current. Latest tag: $latestVersion." }
+                    $updateInfo.CheckedAt = (Get-Date).ToString('s')
+                }
+                else {
+                    $updateInfo.Status = 'Warn'
+                    $updateInfo.Message = 'Could not find a GitHub release or tag to compare.'
+                    $updateInfo.CheckedAt = (Get-Date).ToString('s')
+                }
+            }
+            catch {
+                $updateInfo.Status = 'Warn'
+                $updateInfo.Message = "Could not check GitHub releases or tags. $($_.Exception.Message)"
+                $updateInfo.CheckedAt = (Get-Date).ToString('s')
+            }
+        }
+    }
+}
+
 $report = [ordered]@{
     Metadata = [ordered]@{
         GeneratedAt       = $completedAt.ToString('yyyy-MM-dd HH:mm:ss')
@@ -1434,9 +1782,10 @@ $report = [ordered]@{
         RunHost           = $env:COMPUTERNAME
         RunUser           = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         PowerShellVersion = $PSVersionTable.PSVersion.ToString()
-        ScriptVersion     = '2.1.0'
+        ScriptVersion     = $scriptVersion
     }
     OverallStatus       = $overallStatus
+    UpdateInfo          = $updateInfo
     SummaryCards        = $summaryCards
     Forest              = $forestInfo
     Domains             = $domainInfo
@@ -1487,6 +1836,27 @@ $htmlTemplate = @'
   <title>AD Health Dashboard</title>
   <style>
     :root {
+      color-scheme: dark;
+      --bg: #071421;
+      --panel: rgba(10, 30, 48, 0.92);
+      --panel-2: rgba(13, 42, 67, 0.96);
+      --text: #eef7ff;
+      --muted: #8fa9bd;
+      --line: rgba(118, 183, 214, 0.18);
+      --green: #48e36f;
+      --green-bg: rgba(72, 227, 111, 0.14);
+      --red: #ff5e6b;
+      --red-bg: rgba(255, 94, 107, 0.14);
+      --amber: #ffce4a;
+      --amber-bg: rgba(255, 206, 74, 0.15);
+      --blue: #28b7ff;
+      --blue-bg: rgba(40, 183, 255, 0.14);
+      --cyan: #41f2ff;
+      --gray-bg: rgba(156, 178, 198, 0.14);
+      --shadow: 0 22px 60px rgba(0, 0, 0, 0.42);
+    }
+    * { box-sizing: border-box; }
+    body.theme-light {
       color-scheme: light;
       --bg: #f5f7fb;
       --panel: #ffffff;
@@ -1502,21 +1872,31 @@ $htmlTemplate = @'
       --amber-bg: #fff4df;
       --blue: #2368b6;
       --blue-bg: #eaf2ff;
+      --cyan: #2368b6;
       --gray-bg: #f0f2f5;
       --shadow: 0 10px 30px rgba(21, 31, 49, 0.08);
     }
-    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Segoe UI", Arial, sans-serif;
       color: var(--text);
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 18% -10%, rgba(40, 183, 255, 0.2), transparent 28%),
+        radial-gradient(circle at 88% 4%, rgba(72, 227, 111, 0.12), transparent 24%),
+        linear-gradient(145deg, #05101c 0%, #071421 46%, #0a1928 100%);
+    }
+    body.theme-light {
+      background: #f5f7fb;
     }
     header {
-      background: #182235;
+      background: rgba(5, 16, 28, 0.78);
       color: #ffffff;
-      padding: 22px 28px;
-      border-bottom: 4px solid #3aa675;
+      padding: 24px 28px 18px;
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
     header h1 {
       margin: 0 0 8px;
@@ -1524,11 +1904,61 @@ $htmlTemplate = @'
       font-weight: 700;
       letter-spacing: 0;
     }
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .theme-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #b8d4e7;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .theme-select {
+      border: 1px solid var(--line);
+      background: rgba(10, 30, 48, 0.78);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-weight: 700;
+    }
+    body.theme-light header {
+      background: #182235;
+      border-bottom: 4px solid #3aa675;
+      backdrop-filter: none;
+    }
+    body.theme-light .theme-select,
+    body.theme-light .tab-button,
+    body.theme-light .search,
+    body.theme-light .col-filter {
+      background: #ffffff;
+      color: #172033;
+    }
+    body.theme-light footer {
+      background: #ffffff;
+    }
+    body.theme-light .card-group {
+      background: #ffffff;
+    }
+    body.theme-light th {
+      background: #f6f8fb;
+      color: #34445c;
+    }
+    body.theme-light .table-wrap {
+      background: #ffffff;
+    }
+    body.theme-light tbody tr:nth-child(even) td { background: #fbfcfe; }
+    body.theme-light tr:hover td { background: #edf5ff; }
+    body.theme-light .pie { box-shadow: inset 0 0 0 14px #ffffff; }
     header .meta {
       display: flex;
       flex-wrap: wrap;
       gap: 12px 24px;
-      color: #d8e1ee;
+      color: #b8d4e7;
       font-size: 13px;
     }
     main { padding: 22px 28px 36px; }
@@ -1537,7 +1967,7 @@ $htmlTemplate = @'
       color: var(--muted);
       font-size: 13px;
       border-top: 1px solid var(--line);
-      background: #ffffff;
+      background: rgba(5, 16, 28, 0.82);
     }
     .footer-grid {
       display: grid;
@@ -1562,7 +1992,7 @@ $htmlTemplate = @'
     }
     .tab-button {
       border: 1px solid var(--line);
-      background: #ffffff;
+      background: rgba(10, 30, 48, 0.78);
       color: var(--text);
       padding: 9px 13px;
       border-radius: 6px;
@@ -1571,9 +2001,10 @@ $htmlTemplate = @'
       white-space: nowrap;
     }
     .tab-button.active {
-      background: #2368b6;
-      border-color: #2368b6;
+      background: linear-gradient(135deg, #0d80ff, #18c7ff);
+      border-color: rgba(65, 242, 255, 0.75);
       color: #ffffff;
+      box-shadow: 0 8px 24px rgba(24, 199, 255, 0.2);
     }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
@@ -1589,7 +2020,7 @@ $htmlTemplate = @'
       border: 1px solid var(--line);
       border-radius: 8px;
       margin-bottom: 18px;
-      background: #ffffff;
+      background: rgba(8, 24, 39, 0.88);
       box-shadow: var(--shadow);
       overflow: hidden;
     }
@@ -1606,10 +2037,10 @@ $htmlTemplate = @'
       margin-bottom: 0;
       box-shadow: none;
     }
-    .group-domain h3 { background: #eaf2ff; color: #164f8e; }
-    .group-objects h3 { background: #e8f5ee; color: #12623d; }
-    .group-health h3 { background: #fff4df; color: #7c4b00; }
-    .group-runtime h3 { background: #f0f2f5; color: #4a5668; }
+    .group-domain h3 { background: rgba(40, 183, 255, 0.12); color: var(--cyan); }
+    .group-objects h3 { background: rgba(72, 227, 111, 0.11); color: var(--green); }
+    .group-health h3 { background: rgba(255, 206, 74, 0.11); color: var(--amber); }
+    .group-runtime h3 { background: rgba(156, 178, 198, 0.12); color: #c8d6e3; }
     .card, .section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1659,6 +2090,8 @@ $htmlTemplate = @'
       border-radius: 6px;
       padding: 9px 11px;
       font-size: 14px;
+      background: rgba(6, 18, 30, 0.9);
+      color: var(--text);
     }
     .table-wrap {
       overflow: auto;
@@ -1666,7 +2099,7 @@ $htmlTemplate = @'
       max-height: 72vh;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #ffffff;
+      background: rgba(6, 18, 30, 0.9);
     }
     table {
       border-collapse: separate;
@@ -1684,8 +2117,8 @@ $htmlTemplate = @'
       max-width: 420px;
     }
     th {
-      background: #f6f8fb;
-      color: #34445c;
+      background: #0d2a43;
+      color: #bdeeff;
       position: sticky;
       top: 0;
       z-index: 1;
@@ -1694,8 +2127,8 @@ $htmlTemplate = @'
       letter-spacing: .03em;
       box-shadow: inset 0 -1px 0 var(--line);
     }
-    tbody tr:nth-child(even) td { background: #fbfcfe; }
-    tr:hover td { background: #edf5ff; }
+    tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.018); }
+    tr:hover td { background: rgba(40, 183, 255, 0.08); }
     td.wrap, th.wrap {
       white-space: normal;
       min-width: 280px;
@@ -1710,7 +2143,8 @@ $htmlTemplate = @'
       border-radius: 5px;
       padding: 6px 7px;
       font-size: 12px;
-      background: #ffffff;
+      background: rgba(6, 18, 30, 0.9);
+      color: var(--text);
       text-transform: none;
       letter-spacing: 0;
       font-weight: 500;
@@ -1761,7 +2195,7 @@ $htmlTemplate = @'
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 14px;
-      background: #ffffff;
+      background: var(--panel);
     }
     .chart-title {
       font-weight: 750;
@@ -1779,7 +2213,7 @@ $htmlTemplate = @'
       border-radius: 50%;
       flex: 0 0 auto;
       border: 1px solid var(--line);
-      box-shadow: inset 0 0 0 14px #ffffff;
+      box-shadow: inset 0 0 0 14px #0a1e30;
     }
     .legend {
       display: grid;
@@ -1798,6 +2232,34 @@ $htmlTemplate = @'
       border-radius: 3px;
       display: inline-block;
     }
+    .update-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+      padding: 13px 15px;
+      border: 1px solid rgba(255, 206, 74, 0.38);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(255, 206, 74, 0.16), rgba(40, 183, 255, 0.09));
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
+    }
+    .update-banner.show { display: flex; }
+    .update-title { font-weight: 800; color: var(--amber); margin-bottom: 3px; }
+    .update-message { color: #d9e9f4; font-size: 13px; }
+    .update-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      padding: 9px 12px;
+      background: linear-gradient(135deg, #0d80ff, #18c7ff);
+      color: #ffffff;
+      text-decoration: none;
+      font-weight: 800;
+      white-space: nowrap;
+      border: 1px solid rgba(65, 242, 255, 0.65);
+    }
     @media (max-width: 720px) {
       main { padding: 16px; }
       footer { padding: 16px; }
@@ -1808,13 +2270,25 @@ $htmlTemplate = @'
     }
   </style>
 </head>
-<body>
+<body class="theme-light">
   <header>
-    <h1>Active Directory Health Dashboard</h1>
-    <div class="meta" id="header-meta"></div>
+    <div class="topbar">
+      <div>
+        <h1>Active Directory Health Dashboard</h1>
+        <div class="meta" id="header-meta"></div>
+      </div>
+      <label class="theme-control">
+        Theme
+        <select class="theme-select" id="theme-select">
+          <option value="theme-light">Classic</option>
+          <option value="theme-dark">Dark</option>
+        </select>
+      </label>
+    </div>
   </header>
 
   <main>
+    <div class="update-banner" id="update-banner"></div>
     <nav class="tabs" id="tabs"></nav>
     <div id="panels"></div>
   </main>
@@ -1838,6 +2312,9 @@ $htmlTemplate = @'
   <script id="report-data" type="application/json">__REPORT_JSON__</script>
   <script>
     const report = JSON.parse(document.getElementById('report-data').textContent);
+    const savedTheme = localStorage.getItem('adHealthTheme') || 'theme-light';
+    document.body.classList.remove('theme-light', 'theme-dark');
+    document.body.classList.add(savedTheme);
 
     const tabs = [
       ['summary', 'Summary'],
@@ -2248,8 +2725,8 @@ $htmlTemplate = @'
         { key: 'Status', label: 'Status', status: true },
         { key: 'Domain', label: 'Domain' },
         { key: 'BackupCount', label: 'Backups' },
-        { key: 'BackupPath', label: 'Backup path', className: 'xwide' },
-        { key: 'PreviousRunPath', label: 'Previous run', className: 'xwide' },
+        { key: 'BackupPath', label: 'Backup path', className: 'wrap' },
+        { key: 'PreviousRunPath', label: 'Previous run', className: 'wrap' },
         { key: 'Message', label: 'Message', className: 'wrap' }
       ]))
       + section('GPO Changes Since Previous Run', table(report.GpoChangeHealth, [
@@ -2328,8 +2805,38 @@ $htmlTemplate = @'
       `Generated: ${esc(report.Metadata.GeneratedAt)}`,
       `Run host: ${esc(report.Metadata.RunHost)}`,
       `Runtime: ${esc(report.Metadata.RuntimeSeconds)} seconds`,
+      `Update check: ${esc((report.UpdateInfo || {}).Status || 'Unknown')}`,
       `PowerShell: ${esc(report.Metadata.PowerShellVersion)}`
     ].map(x => `<div>${x}</div>`).join('');
+
+    const updateBanner = document.getElementById('update-banner');
+    const updateInfo = report.UpdateInfo || {};
+    if (updateInfo.IsUpdateAvailable) {
+      updateBanner.classList.add('show');
+      updateBanner.innerHTML = `
+        <div>
+          <div class="update-title">New dashboard version available</div>
+          <div class="update-message">${esc(updateInfo.Message)} Current: v${esc(updateInfo.CurrentVersion)}. Latest: ${esc(updateInfo.LatestVersion)}.</div>
+        </div>
+        <a class="update-button" href="${esc(updateInfo.ReleaseUrl || updateInfo.RepositoryUrl || '#')}" target="_blank" rel="noopener">Download from GitHub</a>`;
+    }
+    else if (updateInfo.Status === 'Warn') {
+      updateBanner.classList.add('show');
+      updateBanner.innerHTML = `
+        <div>
+          <div class="update-title">GitHub update check warning</div>
+          <div class="update-message">${esc(updateInfo.Message)}</div>
+        </div>
+        <a class="update-button" href="${esc(updateInfo.ReleaseUrl || updateInfo.RepositoryUrl || '#')}" target="_blank" rel="noopener">Open GitHub</a>`;
+    }
+
+    const themeSelect = document.getElementById('theme-select');
+    themeSelect.value = savedTheme;
+    themeSelect.addEventListener('change', () => {
+      document.body.classList.remove('theme-light', 'theme-dark');
+      document.body.classList.add(themeSelect.value);
+      localStorage.setItem('adHealthTheme', themeSelect.value);
+    });
 
     const tabsEl = document.getElementById('tabs');
     const panelsEl = document.getElementById('panels');
